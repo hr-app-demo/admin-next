@@ -7,24 +7,27 @@ import {
   Popconfirm,
   Select,
   Space,
+  Spin,
   Tag,
 } from '@arco-design/web-react'
 import { IconDelete, IconPlus, IconRefresh } from '@arco-design/web-react/icon'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { getApiErrorMessage } from '../../apis/http'
+import { listDictionaries } from '../../apis/settings/dictionaries'
+import {
+  createFormTemplate,
+  deleteFormTemplate,
+  listFormTemplates,
+  updateFormTemplate,
+} from '../../apis/settings/form-templates'
 import {
   fieldTypeLabels,
   type FieldGroup,
   type FieldType,
+  type DictionaryDefinition,
   type FormTemplateDefinition,
   type FormTemplateField,
 } from '../../data/formConfig'
-import {
-  deleteFormTemplate,
-  getAllDictionaries,
-  getAllFormTemplates,
-  getFormTemplateByKey,
-  upsertFormTemplate,
-} from '../../lib/formConfigStore'
 
 const fieldGroups: Array<{ label: string; value: FieldGroup }> = [
   { label: '基本信息', value: 'basic' },
@@ -33,14 +36,12 @@ const fieldGroups: Array<{ label: string; value: FieldGroup }> = [
 ]
 
 const fieldTypes = Object.keys(fieldTypeLabels) as FieldType[]
-
-function createEmptyField(index: number): FormTemplateField {
+function createEmptyField(): FormTemplateField {
   return {
-    key: `custom_field_${index + 1}`,
-    label: `新字段 ${index + 1}`,
+    key: '',
+    label: '',
     type: 'text',
     required: false,
-    builtin: false,
     group: 'other',
     canFilter: true,
     placeholder: '',
@@ -49,11 +50,10 @@ function createEmptyField(index: number): FormTemplateField {
 
 function createEmptyTemplate(): FormTemplateDefinition {
   return {
-    key: '',
-    name: '新模板',
+    id: '',
+    name: '',
     description: '',
-    coverageHint: '',
-    fields: [createEmptyField(0)],
+    fields: [createEmptyField()],
   }
 }
 
@@ -65,34 +65,55 @@ function cloneTemplate(template: FormTemplateDefinition) {
 }
 
 export default function FormSettingsPage() {
-  const [version, setVersion] = useState(0)
-  const templates = useMemo(() => getAllFormTemplates(), [version])
-  const dictionaries = useMemo(() => getAllDictionaries(), [version])
-  const [selectedKey, setSelectedKey] = useState(templates[0]?.key || '')
-  const [draft, setDraft] = useState<FormTemplateDefinition | null>(
-    templates[0] ? cloneTemplate(templates[0]) : null,
-  )
+  const [templates, setTemplates] = useState<FormTemplateDefinition[]>([])
+  const [dictionaries, setDictionaries] = useState<DictionaryDefinition[]>([])
+  const [selectedId, setSelectedId] = useState('')
+  const [draft, setDraft] = useState<FormTemplateDefinition | null>(null)
   const [isCreating, setIsCreating] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  const loadData = async (preferredSelectedId?: string, preserveCreateState: boolean = false) => {
+    setLoading(true)
+    try {
+      const [nextTemplates, nextDictionaries] = await Promise.all([
+        listFormTemplates(),
+        listDictionaries(),
+      ])
+      setTemplates(nextTemplates)
+      setDictionaries(nextDictionaries)
+      if (!preserveCreateState) {
+        const fallback =
+          nextTemplates.find((item) => item.id === preferredSelectedId) || nextTemplates[0] || null
+        setSelectedId(fallback?.id || '')
+        setDraft(fallback ? cloneTemplate(fallback) : null)
+      }
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, '加载模板数据失败'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [])
 
   useEffect(() => {
     if (isCreating) return
-    if (!selectedKey && templates[0]) {
-      setSelectedKey(templates[0].key)
-      setDraft(cloneTemplate(templates[0]))
-      return
-    }
-    const current = getFormTemplateByKey(selectedKey)
+    const current = templates.find((item) => item.id === selectedId) || templates[0] || null
+    setSelectedId(current?.id || '')
     setDraft(current ? cloneTemplate(current) : null)
-  }, [isCreating, selectedKey, templates])
+  }, [isCreating, selectedId, templates])
 
   const dictionaryOptions = dictionaries.map((dictionary) => ({
     label: dictionary.label,
-    value: dictionary.key,
+    value: dictionary.id,
   }))
 
   const beginCreate = () => {
     setIsCreating(true)
-    setSelectedKey('')
+    setSelectedId('')
     setDraft(createEmptyTemplate())
   }
 
@@ -118,56 +139,101 @@ export default function FormSettingsPage() {
       setDraft(createEmptyTemplate())
       return
     }
-    const current = getFormTemplateByKey(selectedKey)
+    const current = templates.find((item) => item.id === selectedId) || null
     setDraft(current ? cloneTemplate(current) : null)
   }
 
-  const handleSave = () => {
+  const handleDuplicate = () => {
+    if (!draft || isCreating) return
+    setIsCreating(true)
+    setSelectedId('')
+    setDraft({
+      ...cloneTemplate(draft),
+      id: '',
+      name: `${draft.name} 副本`,
+    })
+    Message.success('已基于当前模板创建副本草稿')
+  }
+
+  const moveField = (index: number, direction: -1 | 1) => {
+    setDraft((current) => {
+      if (!current) return current
+      const nextIndex = index + direction
+      if (nextIndex < 0 || nextIndex >= current.fields.length) return current
+      const nextFields = [...current.fields]
+      const [target] = nextFields.splice(index, 1)
+      nextFields.splice(nextIndex, 0, target)
+      return { ...current, fields: nextFields }
+    })
+  }
+
+  const handleSave = async () => {
     if (!draft) return
-    const nextKey = draft.key.trim()
-    if (!nextKey) {
-      Message.warning('请先填写模板 Key')
+    const nextName = draft.name.trim()
+    if (!nextName) {
+      Message.warning('请先填写模板名称')
+      return
+    }
+    const hasEmptyField = draft.fields.some((field) => !field.key.trim() || !field.label.trim())
+    if (hasEmptyField) {
+      Message.warning('请先填写所有字段的展示标题和标识')
       return
     }
     const sanitized: FormTemplateDefinition = {
       ...draft,
-      key: nextKey,
-      name: draft.name.trim(),
+      name: nextName,
       description: draft.description.trim(),
-      coverageHint: draft.coverageHint.trim(),
-      fields: draft.fields
-        .map((field, index) => ({
-          ...field,
-          key: field.key.trim() || `field_${index + 1}`,
-          label: field.label.trim() || `字段 ${index + 1}`,
-          placeholder: field.placeholder?.trim() || '',
-        }))
-        .filter((field) => field.key && field.label),
+      fields: draft.fields.map((field) => ({
+        ...field,
+        key: field.key.trim(),
+        label: field.label.trim(),
+        placeholder: field.placeholder?.trim() || '',
+      })),
     }
-    upsertFormTemplate(sanitized)
-    Message.success(isCreating ? '模板已创建' : '模板已保存')
-    setIsCreating(false)
-    setSelectedKey(sanitized.key)
-    setVersion((current) => current + 1)
+    setSaving(true)
+    try {
+      if (isCreating) {
+        const created = await createFormTemplate({
+          name: sanitized.name,
+          description: sanitized.description,
+          fields: sanitized.fields,
+        })
+        Message.success('模板已创建')
+        setIsCreating(false)
+        await loadData(created.id, false)
+      } else {
+        const updated = await updateFormTemplate(draft.id, {
+          name: sanitized.name,
+          description: sanitized.description,
+          fields: sanitized.fields,
+        })
+        Message.success('模板已保存')
+        await loadData(updated.id, false)
+      }
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, isCreating ? '创建模板失败' : '保存模板失败'))
+    } finally {
+      setSaving(false)
+    }
   }
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!draft) return
     if (isCreating) {
       setIsCreating(false)
       const fallback = templates[0] || null
-      setSelectedKey(fallback?.key || '')
+      setSelectedId(fallback?.id || '')
       setDraft(fallback ? cloneTemplate(fallback) : null)
       return
     }
-    deleteFormTemplate(draft.key)
-    Message.success('模板已删除')
-    const remaining = getAllFormTemplates().filter((item) => item.key !== draft.key)
-    const fallback = remaining[0] || null
-    setIsCreating(false)
-    setSelectedKey(fallback?.key || '')
-    setDraft(fallback ? cloneTemplate(fallback) : null)
-    setVersion((current) => current + 1)
+    try {
+      await deleteFormTemplate(draft.id)
+      Message.success('模板已删除')
+      setIsCreating(false)
+      await loadData(undefined, false)
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, '删除模板失败'))
+    }
   }
 
   return (
@@ -183,35 +249,37 @@ export default function FormSettingsPage() {
             </Button>
           }
         >
-          <div className="next-settings-nav">
-            {templates.map((template) => (
-              <button
-                key={template.key}
-                type="button"
-                className={`next-settings-nav__item${!isCreating && selectedKey === template.key ? ' is-active' : ''}`}
-                onClick={() => {
-                  setIsCreating(false)
-                  setSelectedKey(template.key)
-                }}
-              >
-                <div>
-                  <strong>{template.name}</strong>
-                  <span>{template.key}</span>
-                </div>
-                <Tag>{template.fields.length} 个字段</Tag>
-              </button>
-            ))}
+          <Spin loading={loading} block>
+            <div className="next-settings-nav">
+              {templates.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  className={`next-settings-nav__item${!isCreating && selectedId === template.id ? ' is-active' : ''}`}
+                  onClick={() => {
+                    setIsCreating(false)
+                    setSelectedId(template.id)
+                  }}
+                >
+                  <div>
+                    <strong>{template.name}</strong>
+                    <span>{template.fields.length} 个字段</span>
+                  </div>
+                  <Tag>{template.fields.length} 个字段</Tag>
+                </button>
+              ))}
 
-            {isCreating ? (
-              <button type="button" className="next-settings-nav__item is-active">
-                <div>
-                  <strong>新模板</strong>
-                  <span>未保存</span>
-                </div>
-                <Tag color="arcoblue">草稿</Tag>
-              </button>
-            ) : null}
-          </div>
+              {isCreating ? (
+                <button type="button" className="next-settings-nav__item is-active">
+                  <div>
+                    <strong>新模板</strong>
+                    <span>未保存</span>
+                  </div>
+                  <Tag color="arcoblue">草稿</Tag>
+                </button>
+              ) : null}
+            </div>
+          </Spin>
         </Card>
 
         <div className="next-settings-content">
@@ -224,6 +292,9 @@ export default function FormSettingsPage() {
                 <Button icon={<IconRefresh />} onClick={handleReset}>
                   重置
                 </Button>
+                <Button disabled={!draft || isCreating} onClick={handleDuplicate}>
+                  复制模板
+                </Button>
                 <Popconfirm
                   title={isCreating ? '放弃当前新模板？' : '确认删除这个模板吗？'}
                   onOk={handleDelete}
@@ -232,7 +303,7 @@ export default function FormSettingsPage() {
                     {isCreating ? '放弃' : '删除'}
                   </Button>
                 </Popconfirm>
-                <Button type="primary" onClick={handleSave}>
+                <Button type="primary" loading={saving} onClick={() => void handleSave()}>
                   保存
                 </Button>
               </Space>
@@ -240,16 +311,6 @@ export default function FormSettingsPage() {
           >
             {draft ? (
               <div className="next-job-create__form">
-                <div className="next-job-create__field">
-                  <label>模板 Key</label>
-                  <Input
-                    value={draft.key}
-                    disabled={!isCreating}
-                    onChange={(value) => updateTemplate({ key: value })}
-                    placeholder="例如：da-default"
-                  />
-                </div>
-
                 <div className="next-job-create__field">
                   <label>模板名称</label>
                   <Input value={draft.name} onChange={(value) => updateTemplate({ name: value })} />
@@ -264,21 +325,12 @@ export default function FormSettingsPage() {
                   />
                 </div>
 
-                <div className="next-job-create__field">
-                  <label>覆盖说明</label>
-                  <Input.TextArea
-                    value={draft.coverageHint}
-                    onChange={(value) => updateTemplate({ coverageHint: value })}
-                    autoSize={{ minRows: 3, maxRows: 6 }}
-                  />
-                </div>
-
                 <div className="next-settings-workspace__section">
                   <div className="next-settings-workspace__section-header">
                     <div>
                       <strong>字段配置</strong>
                       <div className="next-job-create__field-tip">
-                        左侧模板只是目录，这里才是当前模板的字段数据，支持新增、修改和删除。
+                        模板只保留名称和说明。字段支持上下调整顺序，便于更快整理报名表结构。
                       </div>
                     </div>
                     <Button
@@ -288,7 +340,7 @@ export default function FormSettingsPage() {
                           current
                             ? {
                                 ...current,
-                                fields: [...current.fields, createEmptyField(current.fields.length)],
+                                fields: [...current.fields, createEmptyField()],
                               }
                             : current,
                         )
@@ -306,34 +358,51 @@ export default function FormSettingsPage() {
                         className="next-job-create__subcard"
                         title={field.label || `字段 ${index + 1}`}
                         extra={
-                          <Button
-                            size="small"
-                            status="danger"
-                            icon={<IconDelete />}
-                            onClick={() =>
-                              setDraft((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      fields: current.fields.filter((_, fieldIndex) => fieldIndex !== index),
-                                    }
-                                  : current,
-                              )
-                            }
-                          >
-                            删除字段
-                          </Button>
+                          <Space>
+                            <Button size="small" disabled={index === 0} onClick={() => moveField(index, -1)}>
+                              上移
+                            </Button>
+                            <Button
+                              size="small"
+                              disabled={index === draft.fields.length - 1}
+                              onClick={() => moveField(index, 1)}
+                            >
+                              下移
+                            </Button>
+                            <Button
+                              size="small"
+                              status="danger"
+                              icon={<IconDelete />}
+                              disabled={draft.fields.length === 1}
+                              onClick={() =>
+                                setDraft((current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        fields: current.fields.filter((_, fieldIndex) => fieldIndex !== index),
+                                      }
+                                    : current,
+                                )
+                              }
+                            >
+                              删除字段
+                            </Button>
+                          </Space>
                         }
                       >
                         <div className="next-settings-workspace__field-grid">
                           <div className="next-job-create__field">
-                            <label>字段名称</label>
+                            <label>展示标题</label>
                             <Input value={field.label} onChange={(value) => updateField(index, { label: value })} />
                           </div>
 
                           <div className="next-job-create__field">
-                            <label>字段 Key</label>
-                            <Input value={field.key} onChange={(value) => updateField(index, { key: value })} />
+                            <label>字段标识</label>
+                            <Input
+                              value={field.key}
+                              onChange={(value) => updateField(index, { key: value })}
+                              placeholder="用于内部字段映射"
+                            />
                           </div>
 
                           <div className="next-job-create__field">
@@ -343,9 +412,9 @@ export default function FormSettingsPage() {
                               onChange={(value) =>
                                 updateField(index, {
                                   type: String(value) as FieldType,
-                                  dictionaryKey:
+                                  dictionaryId:
                                     value === 'select' || value === 'multiselect'
-                                      ? field.dictionaryKey
+                                      ? field.dictionaryId
                                       : undefined,
                                 })
                               }
@@ -379,10 +448,10 @@ export default function FormSettingsPage() {
                               <label>字典来源</label>
                               <Select
                                 allowClear
-                                value={field.dictionaryKey}
+                                value={field.dictionaryId}
                                 placeholder="选择常量字典"
                                 onChange={(value) =>
-                                  updateField(index, { dictionaryKey: value ? String(value) : undefined })
+                                  updateField(index, { dictionaryId: value ? String(value) : undefined })
                                 }
                               >
                                 {dictionaryOptions.map((option) => (
@@ -416,12 +485,6 @@ export default function FormSettingsPage() {
                             onChange={(checked) => updateField(index, { canFilter: checked })}
                           >
                             支持自动筛选
-                          </Checkbox>
-                          <Checkbox
-                            checked={field.builtin}
-                            onChange={(checked) => updateField(index, { builtin: checked })}
-                          >
-                            内置字段
                           </Checkbox>
                         </div>
                       </Card>

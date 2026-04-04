@@ -26,7 +26,10 @@ import {
   type FormTemplateDefinition,
   type FormTemplateField,
 } from '../../data/formConfig'
-import { getAllDictionaries, getAllFormTemplates, resolveDictionaryOptions } from '../../lib/formConfigStore'
+import type { DictionaryDefinition } from '../../data/formConfig'
+import { getApiErrorMessage } from '../../apis/http'
+import { listDictionaries } from '../../apis/settings/dictionaries'
+import { listFormTemplates } from '../../apis/settings/form-templates'
 import { getAllJobs, getJobProfileById, upsertJobProfile } from '../../lib/jobsStore'
 
 const { Row, Col } = Grid
@@ -76,7 +79,7 @@ function hydrateFieldsFromProfile(template: FormTemplateDefinition | null, profi
   type: FormTemplateField['type']
   required: boolean
   canFilter: boolean
-  dictionaryKey?: string
+  dictionaryId?: string
   options?: string[]
 }>): DraftField[] {
   const baseFields = cloneTemplateFields(template)
@@ -89,7 +92,7 @@ function hydrateFieldsFromProfile(template: FormTemplateDefinition | null, profi
       ...field,
       required: saved.required,
       selectedForFilter: saved.canFilter,
-      dictionaryKey: saved.dictionaryKey || field.dictionaryKey,
+      dictionaryId: saved.dictionaryId || field.dictionaryId,
     }
   })
 }
@@ -112,6 +115,14 @@ function getFieldGroupLabel(group: FieldGroup) {
   return '其他信息字段'
 }
 
+function resolveDictionaryOptionsFromList(
+  dictionaries: DictionaryDefinition[],
+  dictionaryId?: string | null,
+) {
+  if (!dictionaryId) return []
+  return dictionaries.find((item) => item.id === dictionaryId)?.options || []
+}
+
 export default function CreateJobPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -120,8 +131,9 @@ export default function CreateJobPage() {
   const copyProfile = editJobId ? getJobProfileById(editJobId) : copyFrom ? getJobProfileById(copyFrom) : null
   const isEditMode = Boolean(editJobId && copyProfile)
 
-  const dictionaries = useMemo(() => getAllDictionaries(), [])
-  const templates = useMemo(() => getAllFormTemplates(), [])
+  const [dictionaries, setDictionaries] = useState<DictionaryDefinition[]>([])
+  const [templates, setTemplates] = useState<FormTemplateDefinition[]>([])
+  const [configLoading, setConfigLoading] = useState(true)
   const ownerOptions = useMemo(
     () =>
       Array.from(
@@ -134,8 +146,6 @@ export default function CreateJobPage() {
     [],
   )
 
-  const fallbackTemplate = templates[0] || null
-  const copyTemplate = templates.find((item) => item.key === copyProfile?.formStrategy.template) || fallbackTemplate
   const parsedCompensation = parseCompensation(copyProfile?.compensation)
 
   const [step, setStep] = useState(0)
@@ -150,13 +160,10 @@ export default function CreateJobPage() {
   const [status, setStatus] = useState(copyProfile?.status || '在招')
   const [owner, setOwner] = useState(copyProfile?.owner || ownerOptions[0] || '')
   const [collaborators, setCollaborators] = useState<string[]>(copyProfile?.collaborators || [])
-  const [templateKey, setTemplateKey] = useState(copyTemplate?.key || '')
-  const [coverage, setCoverage] = useState(copyProfile?.formStrategy.coverage || copyTemplate?.coverageHint || '')
+  const [templateId, setTemplateId] = useState(copyProfile?.formStrategy.templateId || '')
   const [resumeRequired, setResumeRequired] = useState(copyProfile?.formStrategy.resumeRequired ?? true)
   const [idRequired, setIdRequired] = useState(copyProfile?.formStrategy.idRequired ?? true)
-  const [formFields, setFormFields] = useState<DraftField[]>(() =>
-    hydrateFieldsFromProfile(copyTemplate, copyProfile?.formFields),
-  )
+  const [formFields, setFormFields] = useState<DraftField[]>([])
   const [automationGroup, setAutomationGroup] = useState<AutomationRuleGroup>(() => ({
     combinator: (copyProfile?.automationRules?.combinator as 'and' | 'or') || 'and',
     rules: copyProfile?.automationRules?.rules?.length
@@ -164,27 +171,71 @@ export default function CreateJobPage() {
       : [],
   }))
 
+  useEffect(() => {
+    const loadConfig = async () => {
+      setConfigLoading(true)
+      try {
+        const [nextDictionaries, nextTemplates] = await Promise.all([
+          listDictionaries(),
+          listFormTemplates(),
+        ])
+        setDictionaries(nextDictionaries)
+        setTemplates(nextTemplates)
+        if (!nextTemplates.length) return
+        const nextTemplate =
+          nextTemplates.find((item) => item.id === templateId) ||
+          nextTemplates.find((item) => item.id === copyProfile?.formStrategy.templateId) ||
+          nextTemplates[0]
+        if (nextTemplate && !nextTemplates.some((item) => item.id === templateId)) {
+          setTemplateId(nextTemplate.id)
+        }
+      } catch (error) {
+        Message.error(getApiErrorMessage(error, '加载表单配置失败'))
+      } finally {
+        setConfigLoading(false)
+      }
+    }
+
+    void loadConfig()
+  }, [])
+
+  const fallbackTemplate = templates[0] || null
+  const copyTemplate = templates.find((item) => item.id === copyProfile?.formStrategy.templateId) || fallbackTemplate
+
+  useEffect(() => {
+    if (!templates.length) return
+    const nextTemplate = templates.find((item) => item.id === templateId) || copyTemplate || fallbackTemplate
+    if (!templateId && nextTemplate) {
+      setTemplateId(nextTemplate.id)
+      setFormFields(hydrateFieldsFromProfile(nextTemplate, copyProfile?.formFields))
+      return
+    }
+    if (templateId && nextTemplate) {
+      setFormFields((current) => {
+        if (current.length > 0) return current
+        return hydrateFieldsFromProfile(nextTemplate, copyProfile?.formFields)
+      })
+    }
+  }, [copyProfile?.formFields, copyTemplate, fallbackTemplate, templateId, templates])
+
   const selectedTemplate = useMemo(
-    () => templates.find((item) => item.key === templateKey) || fallbackTemplate,
-    [fallbackTemplate, templateKey, templates],
+    () => templates.find((item) => item.id === templateId) || fallbackTemplate,
+    [fallbackTemplate, templateId, templates],
   )
 
   useEffect(() => {
     if (!selectedTemplate) return
-    setCoverage((current) =>
-      current && current !== copyProfile?.formStrategy.coverage ? current : selectedTemplate.coverageHint,
-    )
     setFormFields((current) => {
-      const hasUserSelection = current.some((field) => field.selectedForFilter || !field.builtin)
-      if (templateKey === copyProfile?.formStrategy.template && copyProfile?.formFields?.length) {
+      const hasUserSelection = current.some((field) => field.selectedForFilter)
+      if (templateId === copyProfile?.formStrategy.templateId && copyProfile?.formFields?.length) {
         return hydrateFieldsFromProfile(selectedTemplate, copyProfile.formFields)
       }
-      if (hasUserSelection && templateKey === copyProfile?.formStrategy.template) {
+      if (hasUserSelection && templateId === copyProfile?.formStrategy.templateId) {
         return current
       }
       return hydrateFieldsFromProfile(selectedTemplate, undefined)
     })
-  }, [copyProfile?.formStrategy.coverage, copyProfile?.formStrategy.template, selectedTemplate, templateKey])
+  }, [copyProfile?.formFields, copyProfile?.formStrategy.templateId, selectedTemplate, templateId])
 
   const compensation = useMemo(
     () => buildCompensation(minCompensation, maxCompensation, compensationUnit),
@@ -223,8 +274,8 @@ export default function CreateJobPage() {
   }, [selectedFilterFields])
 
   const countryOptions = useMemo(
-    () => resolveDictionaryOptions('country').map((option) => option.value),
-    [],
+    () => resolveDictionaryOptionsFromList(dictionaries, 'country').map((option) => option.value),
+    [dictionaries],
   )
 
   const previewChecklist = useMemo(
@@ -246,9 +297,8 @@ export default function CreateJobPage() {
   }
 
   const handleTemplateChange = (value: string) => {
-    const nextTemplate = templates.find((item) => item.key === value) || null
-    setTemplateKey(value)
-    setCoverage(nextTemplate?.coverageHint || '')
+    const nextTemplate = templates.find((item) => item.id === value) || null
+    setTemplateId(value)
     setFormFields(hydrateFieldsFromProfile(nextTemplate, undefined))
     setAutomationGroup((current) => ({ ...current, rules: [] }))
   }
@@ -271,8 +321,7 @@ export default function CreateJobPage() {
       description,
       highlights: [`${country || 'Global'} 岗位`, '已配置报名表单与自动筛选', '发布后可直接进入招聘进展'],
       formStrategy: {
-        template: templateKey,
-        coverage,
+        templateId,
         resumeRequired,
         idRequired,
       },
@@ -282,8 +331,10 @@ export default function CreateJobPage() {
         type: field.type,
         required: field.required,
         canFilter: field.selectedForFilter || false,
-        dictionaryKey: field.dictionaryKey,
-        options: field.dictionaryKey ? resolveDictionaryOptions(field.dictionaryKey).map((option) => option.value) : undefined,
+        dictionaryId: field.dictionaryId,
+        options: field.dictionaryId
+          ? resolveDictionaryOptionsFromList(dictionaries, field.dictionaryId).map((option) => option.value)
+          : undefined,
       })),
       automationRules: {
         combinator: automationGroup.combinator,
@@ -303,8 +354,8 @@ export default function CreateJobPage() {
         <div className="next-job-create__group-title">{titleText}</div>
         <div className="next-job-create__field-list">
           {fields.map((field) => {
-            const dictionary = dictionaries.find((item) => item.key === field.dictionaryKey)
-            const options = resolveDictionaryOptions(field.dictionaryKey)
+            const dictionary = dictionaries.find((item) => item.id === field.dictionaryId)
+            const options = resolveDictionaryOptionsFromList(dictionaries, field.dictionaryId)
             return (
               <div key={field.key} className="next-job-create__field-card">
                 <div className="next-job-create__field-card-top">
@@ -337,7 +388,7 @@ export default function CreateJobPage() {
                 {dictionary ? (
                   <div className="next-job-create__field-card-meta">
                     引用字典：<strong>{dictionary.label}</strong>
-                    <span>{dictionary.key}</span>
+                    <span>{options.length} 个选项</span>
                   </div>
                 ) : null}
 
@@ -362,7 +413,7 @@ export default function CreateJobPage() {
     const field = formFields.find((item) => item.key === rule.fieldKey)
     if (!field) return null
 
-    const options = resolveDictionaryOptions(field.dictionaryKey)
+    const options = resolveDictionaryOptionsFromList(dictionaries, field.dictionaryId)
 
     return (
       <div key={rule.fieldKey} className="next-job-create__rule-card">
@@ -633,10 +684,10 @@ export default function CreateJobPage() {
                 <div className="next-job-create__form">
                   <Card bordered={false} className="next-job-create__subcard">
                     <div className="next-job-create__field">
-                      <label>表单模板</label>
-                      <Select value={templateKey} onChange={(value) => handleTemplateChange(String(value))}>
+                      <label>报名表模板</label>
+                      <Select value={templateId} onChange={(value) => handleTemplateChange(String(value))}>
                         {templates.map((template) => (
-                          <Select.Option key={template.key} value={template.key}>
+                          <Select.Option key={template.id} value={template.id}>
                             {template.name}
                           </Select.Option>
                         ))}
@@ -644,27 +695,17 @@ export default function CreateJobPage() {
                       <div className="next-job-create__field-tip">
                         模板只作为字段初始化来源。选中后会把模板字段实例化到当前岗位，并继续在这里勾选必填项和自动筛选字段。
                       </div>
+                      {configLoading ? <div className="next-job-create__field-tip">正在加载模板配置...</div> : null}
                     </div>
 
                     {selectedTemplate ? (
                       <div className="next-job-create__template-summary">
-                        <Tag color="arcoblue">{selectedTemplate.key}</Tag>
                         <span>{selectedTemplate.description}</span>
                       </div>
                     ) : null}
                   </Card>
 
                   <Card bordered={false} className="next-job-create__subcard">
-                    <div className="next-job-create__field">
-                      <label>覆盖说明</label>
-                      <Input.TextArea
-                        value={coverage}
-                        onChange={setCoverage}
-                        autoSize={{ minRows: 4, maxRows: 8 }}
-                        placeholder="说明本岗位相对默认表单增加或覆盖了哪些字段"
-                      />
-                    </div>
-
                     <div className="next-job-create__switches">
                       <div className="next-job-create__switch-card">
                         <div>

@@ -5,93 +5,125 @@ import {
   Form,
   Input,
   Message,
+  Modal,
   Popconfirm,
   Select,
   Space,
+  Spin,
   Table,
   Tag,
 } from '@arco-design/web-react'
 import { IconPlus } from '@arco-design/web-react/icon'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  createAdminAccount,
+  deleteAdminAccount,
+  listAdminAccounts,
+  type AdminAccountCreatePayload,
+  updateAdminAccount,
+} from '../../apis/settings/accounts'
+import { listAdminRoles } from '../../apis/settings/roles'
+import { getApiErrorMessage } from '../../apis/http'
+import type { AdminRole, AdminUser } from '../../apis/types'
 
 interface AccountRecord {
-  id: string
+  id: number
   name: string
+  username: string
   email: string
-  role: string
-  status: '启用' | '停用'
+  roleId: number | null
+  roleName: string
+  status: 'enabled' | 'disabled'
   phone: string
   note: string
   lastLogin: string
+  isSuperuser: boolean
+  password?: string
 }
 
-const initialAccounts: AccountRecord[] = [
-  {
-    id: 'account-1',
-    name: 'Ada Zhang',
-    email: 'admin@example.com',
-    role: '管理员',
-    status: '启用',
-    phone: '+86 138 0000 0001',
-    note: '负责整体招聘运营与权限配置。',
-    lastLogin: '2026-03-30 10:20',
-  },
-  {
-    id: 'account-2',
-    name: 'Mia Chen',
-    email: 'mia@example.com',
-    role: '招聘经理',
-    status: '启用',
-    phone: '+86 138 0000 0002',
-    note: '主负责 UK 与 EU 区域岗位。',
-    lastLogin: '2026-03-31 08:40',
-  },
-  {
-    id: 'account-3',
-    name: 'Tony Lin',
-    email: 'tony@example.com',
-    role: '招聘专员',
-    status: '停用',
-    phone: '+86 138 0000 0003',
-    note: '历史账号，当前已停用。',
-    lastLogin: '2026-03-20 19:15',
-  },
-]
+function formatDateTime(value: string | null) {
+  if (!value) return '未登录'
+  return value.replace('T', ' ').slice(0, 16)
+}
 
-function createEmptyAccount(index: number): AccountRecord {
+function toAccountRecord(account: AdminUser): AccountRecord {
   return {
-    id: `account-new-${index + 1}`,
+    id: account.id,
+    name: account.name,
+    username: account.username,
+    email: account.email,
+    roleId: account.role_id,
+    roleName: account.role_name || '未分配',
+    status: account.status,
+    phone: account.phone || '',
+    note: account.note || '',
+    lastLogin: formatDateTime(account.last_login_at),
+    isSuperuser: account.is_superuser,
+  }
+}
+
+function createEmptyAccount(): AccountRecord {
+  return {
+    id: 0,
     name: '',
+    username: '',
     email: '',
-    role: '招聘专员',
-    status: '启用',
+    roleId: null,
+    roleName: '',
+    status: 'enabled',
     phone: '',
     note: '',
     lastLogin: '未登录',
+    isSuperuser: false,
+    password: '',
   }
 }
 
 export default function ProfileSettingsPage() {
-  const [accounts, setAccounts] = useState<AccountRecord[]>(initialAccounts)
+  const [accounts, setAccounts] = useState<AccountRecord[]>([])
+  const [roles, setRoles] = useState<AdminRole[]>([])
   const [drawerVisible, setDrawerVisible] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
   const [keyword, setKeyword] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [submitting, setSubmitting] = useState(false)
   const [form] = Form.useForm<AccountRecord>()
+  const editingRecord = useMemo(
+    () => (editingId ? accounts.find((item) => item.id === editingId) || null : null),
+    [accounts, editingId],
+  )
+
+  const loadData = async () => {
+    setLoading(true)
+    try {
+      const [accountList, roleList] = await Promise.all([listAdminAccounts(keyword), listAdminRoles()])
+      setAccounts(accountList.map(toAccountRecord))
+      setRoles(roleList)
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, '加载账号数据失败'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [])
 
   const filteredAccounts = useMemo(() => {
     const search = keyword.trim().toLowerCase()
     if (!search) return accounts
+
     return accounts.filter((item) =>
-      [item.name, item.email, item.role, item.phone].some((field) =>
-        field.toLowerCase().includes(search),
-      ),
+      [item.name, item.username, item.email, item.roleName, item.phone]
+        .filter(Boolean)
+        .some((field) => field.toLowerCase().includes(search)),
     )
   }, [accounts, keyword])
 
   const openCreateDrawer = () => {
-    const draft = createEmptyAccount(accounts.length)
     setEditingId(null)
-    form.setFieldsValue(draft)
+    form.setFieldsValue(createEmptyAccount())
     setDrawerVisible(true)
   }
 
@@ -109,31 +141,60 @@ export default function ProfileSettingsPage() {
 
   const handleSubmit = async () => {
     const values = await form.validate()
-    const nextRecord: AccountRecord = {
-      ...values,
-      id: editingId || `account-${Date.now()}`,
-      status: values.status || '启用',
-      lastLogin: editingId
-        ? accounts.find((item) => item.id === editingId)?.lastLogin || '未登录'
-        : '未登录',
-    }
+    setSubmitting(true)
 
-    if (editingId) {
-      setAccounts((current) =>
-        current.map((item) => (item.id === editingId ? nextRecord : item)),
-      )
-      Message.success('账号已保存')
-    } else {
-      setAccounts((current) => [nextRecord, ...current])
-      Message.success('账号已创建')
-    }
+    try {
+      if (editingId) {
+        const payload = {
+          name: values.name.trim(),
+          username: values.username.trim(),
+          email: values.email.trim(),
+          phone: values.phone?.trim() || undefined,
+          note: values.note?.trim() || undefined,
+          status: values.status,
+          role_id: values.roleId ?? null,
+          password: values.password?.trim() || undefined,
+        }
+        await updateAdminAccount(editingId, payload)
+        Message.success('账号已保存')
+      } else {
+        const payload: AdminAccountCreatePayload = {
+          name: values.name.trim(),
+          username: values.username.trim() || undefined,
+          email: values.email.trim(),
+          phone: values.phone?.trim() || undefined,
+          note: values.note?.trim() || undefined,
+          status: values.status,
+          role_id: values.roleId ?? undefined,
+          password: values.password?.trim() || undefined,
+        }
+        const created = await createAdminAccount(payload)
+        Message.success('账号已创建')
+        if (created.temporary_password) {
+          Modal.info({
+            title: '已生成临时密码',
+            content: `当前账号临时密码：${created.temporary_password}`,
+          })
+        }
+      }
 
-    closeDrawer()
+      await loadData()
+      closeDrawer()
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, editingId ? '保存账号失败' : '创建账号失败'))
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  const handleDelete = (id: string) => {
-    setAccounts((current) => current.filter((item) => item.id !== id))
-    Message.success('账号已删除')
+  const handleDelete = async (id: number) => {
+    try {
+      await deleteAdminAccount(id)
+      Message.success('账号已删除')
+      await loadData()
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, '删除账号失败'))
+    }
   }
 
   return (
@@ -157,41 +218,57 @@ export default function ProfileSettingsPage() {
           </Space>
         }
       >
-        <Table
-          rowKey="id"
-          pagination={{ pageSize: 8 }}
-          data={filteredAccounts}
-          columns={[
-            { title: '姓名', dataIndex: 'name' },
-            { title: '邮箱账号', dataIndex: 'email' },
-            { title: '角色', dataIndex: 'role' },
-            { title: '手机号', dataIndex: 'phone' },
-            {
-              title: '状态',
-              dataIndex: 'status',
-              render: (value: AccountRecord['status']) => (
-                <Tag color={value === '启用' ? 'green' : 'gray'}>{value}</Tag>
-              ),
-            },
-            { title: '最近登录', dataIndex: 'lastLogin' },
-            {
-              title: '操作',
-              width: 180,
-              render: (_: unknown, record: AccountRecord) => (
-                <Space>
-                  <Button size="mini" onClick={() => openEditDrawer(record)}>
-                    编辑
-                  </Button>
-                  <Popconfirm title="确认删除这个账号吗？" onOk={() => handleDelete(record.id)}>
-                    <Button size="mini" status="danger">
-                      删除
+        <Spin loading={loading} block>
+          <Table
+            rowKey="id"
+            pagination={{ pageSize: 8 }}
+            data={filteredAccounts}
+            columns={[
+              { title: '姓名', dataIndex: 'name' },
+              { title: '用户名', dataIndex: 'username' },
+              { title: '邮箱账号', dataIndex: 'email' },
+              {
+                title: '角色',
+                dataIndex: 'roleName',
+                render: (_: unknown, record: AccountRecord) =>
+                  record.isSuperuser ? <Tag color="gold">超管账户</Tag> : record.roleName,
+              },
+              { title: '手机号', dataIndex: 'phone' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                render: (value: AccountRecord['status'], record: AccountRecord) => (
+                  <Tag color={record.isSuperuser ? 'arcoblue' : value === 'enabled' ? 'green' : 'gray'}>
+                    {record.isSuperuser ? '超管固定启用' : value === 'enabled' ? '启用' : '停用'}
+                  </Tag>
+                ),
+              },
+              { title: '最近登录', dataIndex: 'lastLogin' },
+              {
+                title: '操作',
+                width: 180,
+                render: (_: unknown, record: AccountRecord) => (
+                  <Space>
+                    <Button size="mini" onClick={() => openEditDrawer(record)}>
+                      编辑
                     </Button>
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]}
-        />
+                    {record.isSuperuser ? (
+                      <Button size="mini" disabled>
+                        不可删除
+                      </Button>
+                    ) : (
+                      <Popconfirm title="确认删除这个账号吗？" onOk={() => void handleDelete(record.id)}>
+                        <Button size="mini" status="danger">
+                          删除
+                        </Button>
+                      </Popconfirm>
+                    )}
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </Spin>
       </Card>
 
       <Drawer
@@ -202,7 +279,7 @@ export default function ProfileSettingsPage() {
         footer={
           <Space>
             <Button onClick={closeDrawer}>取消</Button>
-            <Button type="primary" onClick={handleSubmit}>
+            <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
               保存
             </Button>
           </Space>
@@ -213,15 +290,20 @@ export default function ProfileSettingsPage() {
             <Input placeholder="输入账号姓名" />
           </Form.Item>
 
+          <Form.Item field="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
+            <Input placeholder="输入登录用户名，只支持小写字母和数字" />
+          </Form.Item>
+
           <Form.Item field="email" label="邮箱账号" rules={[{ required: true, message: '请输入邮箱账号' }]}>
             <Input placeholder="输入邮箱账号" />
           </Form.Item>
 
-          <Form.Item field="role" label="角色" rules={[{ required: true, message: '请选择角色' }]}>
-            <Select placeholder="选择角色">
-              {['管理员', '招聘经理', '招聘专员', '审核员'].map((role) => (
-                <Select.Option key={role} value={role}>
-                  {role}
+          <Form.Item field="roleId" label="角色">
+            <Select placeholder={editingRecord?.isSuperuser ? '超管账户不绑定普通角色' : '选择角色'} disabled={editingRecord?.isSuperuser}>
+              {roles.map((role) => (
+                <Select.Option key={role.id} value={role.id} disabled={!role.enabled}>
+                  {role.name}
+                  {!role.enabled ? '（已停用）' : ''}
                 </Select.Option>
               ))}
             </Select>
@@ -232,10 +314,20 @@ export default function ProfileSettingsPage() {
           </Form.Item>
 
           <Form.Item field="status" label="账号状态" rules={[{ required: true, message: '请选择账号状态' }]}>
-            <Select placeholder="选择账号状态">
-              <Select.Option value="启用">启用</Select.Option>
-              <Select.Option value="停用">停用</Select.Option>
+            <Select placeholder="选择账号状态" disabled={editingRecord?.isSuperuser}>
+              <Select.Option value="enabled">启用</Select.Option>
+              <Select.Option value="disabled">停用</Select.Option>
             </Select>
+          </Form.Item>
+
+          {editingRecord?.isSuperuser ? (
+            <div className="next-form-inline-hint">
+              超管账号固定为启用状态，且不参与普通角色分配。
+            </div>
+          ) : null}
+
+          <Form.Item field="password" label={editingId ? '重置密码' : '初始密码'}>
+            <Input.Password placeholder={editingId ? '留空则不修改密码' : '留空则由后端生成临时密码'} />
           </Form.Item>
 
           <Form.Item field="note" label="备注">

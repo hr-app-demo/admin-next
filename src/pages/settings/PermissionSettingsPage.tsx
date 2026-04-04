@@ -6,56 +6,45 @@ import {
   Message,
   Popconfirm,
   Space,
+  Spin,
   Switch,
   Tag,
 } from '@arco-design/web-react'
 import { IconDelete, IconPlus, IconRefresh } from '@arco-design/web-react/icon'
 import { useEffect, useState } from 'react'
+import {
+  createAdminRole,
+  deleteAdminRole,
+  listAdminRoles,
+  updateAdminRole,
+} from '../../apis/settings/roles'
+import { listPermissionCatalog } from '../../apis/settings/permissions'
+import { getApiErrorMessage } from '../../apis/http'
+import type { AdminRole, PermissionCatalogGroup } from '../../apis/types'
+import { useAuth } from '../../providers/AuthProvider'
 
 interface RoleRecord {
-  id: string
+  id: number
   name: string
   description: string
   enabled: boolean
   permissions: string[]
 }
 
-const permissionCatalog = [
-  { group: '岗位管理', items: ['查看岗位', '编辑岗位', '发布岗位', '复制岗位'] },
-  { group: '招聘进展', items: ['查看招聘进展', '流转阶段', '批量操作', '上传附件'] },
-  { group: '总人才库', items: ['查看人才库', '编辑候选人', '导出候选人'] },
-  { group: '邮件模块', items: ['查看邮件模板', '编辑邮件模板', '管理发信账号'] },
-  { group: '系统设置', items: ['管理账号', '管理角色', '管理字典与表单'] },
-]
-
-const initialRoles: RoleRecord[] = [
-  {
-    id: 'role-admin',
-    name: '管理员',
-    description: '拥有后台全部模块的配置与操作权限。',
-    enabled: true,
-    permissions: permissionCatalog.flatMap((group) => group.items),
-  },
-  {
-    id: 'role-manager',
-    name: '招聘经理',
-    description: '负责岗位、招聘进展与团队协作。',
-    enabled: true,
-    permissions: ['查看岗位', '编辑岗位', '发布岗位', '查看招聘进展', '流转阶段', '批量操作', '查看人才库', '编辑候选人', '查看邮件模板'],
-  },
-  {
-    id: 'role-specialist',
-    name: '招聘专员',
-    description: '主要负责候选人跟进、附件维护与通知发送。',
-    enabled: true,
-    permissions: ['查看岗位', '查看招聘进展', '上传附件', '查看人才库', '查看邮件模板'],
-  },
-]
-
-function createEmptyRole(index: number): RoleRecord {
+function toRoleRecord(role: AdminRole): RoleRecord {
   return {
-    id: `role-new-${index + 1}`,
-    name: `新角色 ${index + 1}`,
+    id: role.id,
+    name: role.name,
+    description: role.description || '',
+    enabled: role.enabled,
+    permissions: [...role.permissions],
+  }
+}
+
+function createEmptyRole(): RoleRecord {
+  return {
+    id: 0,
+    name: '',
     description: '',
     enabled: true,
     permissions: [],
@@ -63,27 +52,57 @@ function createEmptyRole(index: number): RoleRecord {
 }
 
 export default function PermissionSettingsPage() {
-  const [roles, setRoles] = useState<RoleRecord[]>(initialRoles)
-  const [selectedId, setSelectedId] = useState(initialRoles[0]?.id || '')
-  const [draft, setDraft] = useState<RoleRecord | null>(initialRoles[0] || null)
+  const { refreshCurrentUser } = useAuth()
+  const [roles, setRoles] = useState<RoleRecord[]>([])
+  const [permissionCatalog, setPermissionCatalog] = useState<PermissionCatalogGroup[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [draft, setDraft] = useState<RoleRecord | null>(null)
   const [isCreating, setIsCreating] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  const loadData = async (
+    preferredSelectedId: number | null = selectedId,
+    preserveCreateState: boolean = isCreating,
+  ) => {
+    setLoading(true)
+    try {
+      const [roleList, catalog] = await Promise.all([listAdminRoles(), listPermissionCatalog()])
+      const nextRoles = roleList.map(toRoleRecord)
+      setRoles(nextRoles)
+      setPermissionCatalog(catalog)
+      if (!preserveCreateState) {
+        const fallback = nextRoles.find((item) => item.id === preferredSelectedId) || nextRoles[0] || null
+        setSelectedId(fallback?.id || null)
+        setDraft(fallback ? { ...fallback, permissions: [...fallback.permissions] } : null)
+      }
+    } catch (error) {
+      Message.error(getApiErrorMessage(error, '加载角色与权限数据失败'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [])
 
   useEffect(() => {
     if (isCreating) return
     const current = roles.find((item) => item.id === selectedId) || roles[0] || null
-    setSelectedId(current?.id || '')
+    setSelectedId(current?.id || null)
     setDraft(current ? { ...current, permissions: [...current.permissions] } : null)
   }, [isCreating, roles, selectedId])
 
   const beginCreate = () => {
     setIsCreating(true)
-    setSelectedId('')
-    setDraft(createEmptyRole(roles.length))
+    setSelectedId(null)
+    setDraft(createEmptyRole())
   }
 
   const handleReset = () => {
     if (isCreating) {
-      setDraft(createEmptyRole(roles.length))
+      setDraft(createEmptyRole())
       return
     }
     const current = roles.find((item) => item.id === selectedId) || null
@@ -96,20 +115,38 @@ export default function PermissionSettingsPage() {
       Message.warning('请先填写角色名称')
       return
     }
-    const next = {
-      ...draft,
+    setSaving(true)
+    const payload = {
       name: draft.name.trim(),
-      description: draft.description.trim(),
+      description: draft.description.trim() || undefined,
+      enabled: draft.enabled,
+      permissions: draft.permissions,
     }
-    if (isCreating) {
-      setRoles((current) => [...current, next])
-      Message.success('角色已创建')
-    } else {
-      setRoles((current) => current.map((item) => (item.id === next.id ? next : item)))
-      Message.success('角色已保存')
+
+    const action = async () => {
+      if (isCreating) {
+        const created = await createAdminRole(payload)
+        Message.success('角色已创建')
+        setIsCreating(false)
+        await loadData(created.id, false)
+        await refreshCurrentUser()
+        return
+      } else {
+        await updateAdminRole(draft.id, payload)
+        Message.success('角色已保存')
+        await loadData(draft.id, false)
+        await refreshCurrentUser()
+        return
+      }
     }
-    setIsCreating(false)
-    setSelectedId(next.id)
+
+    void action()
+      .catch((error) => {
+        Message.error(getApiErrorMessage(error, isCreating ? '创建角色失败' : '保存角色失败'))
+      })
+      .finally(() => {
+        setSaving(false)
+      })
   }
 
   const handleDelete = () => {
@@ -117,16 +154,21 @@ export default function PermissionSettingsPage() {
     if (isCreating) {
       setIsCreating(false)
       const fallback = roles[0] || null
-      setSelectedId(fallback?.id || '')
+      setSelectedId(fallback?.id || null)
       setDraft(fallback ? { ...fallback, permissions: [...fallback.permissions] } : null)
       return
     }
-    const next = roles.filter((item) => item.id !== draft.id)
-    setRoles(next)
-    const fallback = next[0] || null
-    setSelectedId(fallback?.id || '')
-    setDraft(fallback ? { ...fallback, permissions: [...fallback.permissions] } : null)
-    Message.success('角色已删除')
+    const action = async () => {
+      const deletedRoleId = draft.id
+      await deleteAdminRole(deletedRoleId)
+      Message.success('角色已删除')
+      await loadData(null, false)
+      await refreshCurrentUser()
+    }
+
+    void action().catch((error) => {
+      Message.error(getApiErrorMessage(error, '删除角色失败'))
+    })
   }
 
   const togglePermission = (permission: string, checked: boolean) => {
@@ -152,35 +194,37 @@ export default function PermissionSettingsPage() {
             </Button>
           }
         >
-          <div className="next-settings-nav">
-            {roles.map((role) => (
-              <button
-                key={role.id}
-                type="button"
-                className={`next-settings-nav__item${!isCreating && selectedId === role.id ? ' is-active' : ''}`}
-                onClick={() => {
-                  setIsCreating(false)
-                  setSelectedId(role.id)
-                }}
-              >
-                <div>
-                  <strong>{role.name}</strong>
-                  <span>{role.permissions.length} 项权限</span>
-                </div>
-                <Tag color={role.enabled ? 'green' : 'gray'}>{role.enabled ? '启用' : '停用'}</Tag>
-              </button>
-            ))}
+          <Spin loading={loading} block>
+            <div className="next-settings-nav">
+              {roles.map((role) => (
+                <button
+                  key={role.id}
+                  type="button"
+                  className={`next-settings-nav__item${!isCreating && selectedId === role.id ? ' is-active' : ''}`}
+                  onClick={() => {
+                    setIsCreating(false)
+                    setSelectedId(role.id)
+                  }}
+                >
+                  <div>
+                    <strong>{role.name}</strong>
+                    <span>{role.permissions.length} 项权限</span>
+                  </div>
+                  <Tag color={role.enabled ? 'green' : 'gray'}>{role.enabled ? '启用' : '停用'}</Tag>
+                </button>
+              ))}
 
-            {isCreating ? (
-              <button type="button" className="next-settings-nav__item is-active">
-                <div>
-                  <strong>新角色</strong>
-                  <span>未保存</span>
-                </div>
-                <Tag color="arcoblue">草稿</Tag>
-              </button>
-            ) : null}
-          </div>
+              {isCreating ? (
+                <button type="button" className="next-settings-nav__item is-active">
+                  <div>
+                    <strong>新角色</strong>
+                    <span>未保存</span>
+                  </div>
+                  <Tag color="arcoblue">草稿</Tag>
+                </button>
+              ) : null}
+            </div>
+          </Spin>
         </Card>
 
         <div className="next-settings-content">
@@ -198,7 +242,7 @@ export default function PermissionSettingsPage() {
                     {isCreating ? '放弃' : '删除'}
                   </Button>
                 </Popconfirm>
-                <Button type="primary" onClick={handleSave}>
+                <Button type="primary" loading={saving} onClick={handleSave}>
                   保存
                 </Button>
               </Space>
@@ -242,7 +286,7 @@ export default function PermissionSettingsPage() {
                   <div className="next-settings-workspace__section-header">
                     <div>
                       <strong>权限配置</strong>
-                      <div className="next-job-create__field-tip">按模块勾选权限项，后面接真实 RBAC 时可以直接映射。</div>
+                      <div className="next-job-create__field-tip">当前先维护菜单与页面访问权限，功能级权限后续再细化。</div>
                     </div>
                   </div>
 

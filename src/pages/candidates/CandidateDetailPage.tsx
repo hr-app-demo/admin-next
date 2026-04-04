@@ -15,6 +15,8 @@ import {
 import { IconArrowLeft } from '@arco-design/web-react/icon'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { listFormTemplates } from '../../apis/settings/form-templates'
+import type { FormTemplateDefinition } from '../../data/formConfig'
 import JoinJobModal from '../../components/shared/JoinJobModal'
 import SendMailModal from '../../components/shared/SendMailModal'
 import {
@@ -25,7 +27,7 @@ import {
   type ProgressRow,
   type ProgressStage,
 } from '../../data/mock'
-import { getFormTemplateByKey } from '../../lib/formConfigStore'
+import { getJobProfileById } from '../../lib/jobsStore'
 
 const stageLabels: Record<Exclude<ProgressStage, 'all'>, string> = {
   screening: '待筛选',
@@ -69,13 +71,26 @@ export default function CandidateDetailPage() {
   const [logMode, setLogMode] = useState<'time' | 'job'>('time')
   const [logJobId, setLogJobId] = useState(initialJobId)
   const [logPage, setLogPage] = useState(1)
+  const [formTemplates, setFormTemplates] = useState<FormTemplateDefinition[]>([])
   const logPageSize = 5
 
   const activeRow = candidateRows.find((row) => row.jobId === activeJobId) || candidateRows[0]
   const activeJob = progressJobs.find((job) => job.id === activeJobId)
   const activeJobHistory = profile?.jobHistory.find((item) => item.jobId === activeJobId)
   const mergeSource = candidateMergeSources[id]
-  const defaultTemplate = getFormTemplateByKey('da-default')
+  const activeJobProfile = activeJobId ? getJobProfileById(activeJobId) : null
+  const defaultTemplate =
+    formTemplates.find((item) => item.id === activeJobProfile?.formStrategy.templateId) ||
+    formTemplates[0] ||
+    null
+
+  useEffect(() => {
+    void listFormTemplates()
+      .then(setFormTemplates)
+      .catch(() => {
+        setFormTemplates([])
+      })
+  }, [])
 
   const jobSummaryRows = useMemo(
     () =>

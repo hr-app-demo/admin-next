@@ -101,8 +101,7 @@ export interface JobProfile {
     audienceDescription: string
   }
   formStrategy: {
-    template: string
-    coverage: string
+    templateId: string
     resumeRequired: boolean
     idRequired: boolean
   }
@@ -136,8 +135,7 @@ export const jobProfiles: Record<string, JobProfile> = {
       audienceDescription: '居住在英国或对远程数据分析岗位感兴趣的候选人。',
     },
     formStrategy: {
-      template: 'da-default',
-      coverage: '岗位覆盖默认模板，并额外收集时区与每周可投入时长',
+      templateId: 'da-default',
       resumeRequired: true,
       idRequired: true,
     },
@@ -166,8 +164,7 @@ export const jobProfiles: Record<string, JobProfile> = {
       audienceDescription: '居住在印尼或对东南亚远程岗位有意向、具备双语沟通能力的候选人。',
     },
     formStrategy: {
-      template: 'sea-default',
-      coverage: '继承默认模板，增加语言能力与本地节假日说明',
+      templateId: 'sea-default',
       resumeRequired: true,
       idRequired: true,
     },
@@ -196,8 +193,7 @@ export const jobProfiles: Record<string, JobProfile> = {
       audienceDescription: '居住在巴西或有意向远程参与巴西项目的候选人。',
     },
     formStrategy: {
-      template: 'qa-reviewer',
-      coverage: '沿用历史模板，无额外字段扩展',
+      templateId: 'qa-reviewer',
       resumeRequired: true,
       idRequired: false,
     },
