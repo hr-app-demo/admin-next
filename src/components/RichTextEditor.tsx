@@ -1,8 +1,8 @@
-import { Button, Message, Space } from '@arco-design/web-react'
+import { Button, Message, Space, Tooltip } from '@arco-design/web-react'
+import { IconBrush } from '@arco-design/web-react/icon'
 import type { IDomEditor, IEditorConfig, IToolbarConfig } from '@wangeditor/editor'
 import { Editor, Toolbar } from '@wangeditor/editor-for-react'
-import type { ChangeEvent } from 'react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import '@wangeditor/editor/dist/css/style.css'
 
 const removableMarkKeys = [
@@ -32,7 +32,6 @@ export default function RichTextEditor({
 }: RichTextEditorProps) {
   const [editor, setEditor] = useState<IDomEditor | null>(null)
   const [painterMarks, setPainterMarks] = useState<Record<string, unknown> | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     return () => {
@@ -135,60 +134,20 @@ export default function RichTextEditor({
     Message.success('格式刷已应用')
   }
 
-  const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-
-    if (!file) return
-    if (!file.type.startsWith('image/')) {
-      Message.warning('请选择图片文件')
-      return
-    }
-
-    try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(String(reader.result || ''))
-        reader.onerror = () => reject(reader.error)
-        reader.readAsDataURL(file)
-      })
-
-      if (!editor) {
-        onChange(
-          `${value || ''}<p><img src="${dataUrl}" alt="${file.name}" style="max-width: 100%;" /></p>`,
-        )
-        Message.success('图片已插入')
-        return
-      }
-
-      editor.focus()
-      ;(editor as unknown as { dangerouslyInsertHtml?: (html: string) => void }).dangerouslyInsertHtml?.(
-        `<p><img src="${dataUrl}" alt="${file.name}" style="max-width: 100%;" /></p>`,
-      )
-      Message.success('图片已插入')
-    } catch {
-      Message.error('图片上传失败，请重试')
-    }
-  }
-
   return (
     <div className="next-rich-editor">
       <div className="next-rich-editor__toolbar-row">
         <Toolbar editor={editor} defaultConfig={toolbarConfig} mode="default" />
         <Space>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: 'none' }}
-            onChange={handleImageSelect}
-          />
-          <Button size="small" onClick={() => fileInputRef.current?.click()}>
-            上传图片
-          </Button>
-          <Button size="small" onClick={handleFormatBrush}>
-            {painterMarks ? '应用格式刷' : '格式刷'}
-          </Button>
+          <Tooltip content={painterMarks ? '应用格式刷' : '格式刷'}>
+            <Button
+              size="small"
+              icon={<IconBrush />}
+              onClick={handleFormatBrush}
+            >
+              {painterMarks ? '应用' : '格式刷'}
+            </Button>
+          </Tooltip>
           {painterMarks ? (
             <Button size="small" type="secondary" onClick={() => setPainterMarks(null)}>
               取消

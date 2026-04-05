@@ -8,7 +8,8 @@ import {
 } from '../lib/auth-session'
 import type { AdminTokenPayload } from './types'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || 'http://127.0.0.1:8001/api'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || 'http://127.0.0.1:8001/api'
+export const API_PUBLIC_BASE_URL = API_BASE_URL.replace(/\/api\/?$/, '')
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & { _retry?: boolean }
 
@@ -19,6 +20,20 @@ export const http = axios.create({
   baseURL: API_BASE_URL,
   timeout: 15000,
 })
+
+export function resolveApiUrl(path?: string | null) {
+  if (!path) return ''
+  if (/^https?:\/\//i.test(path)) return path
+  if (path.startsWith('/')) return `${API_PUBLIC_BASE_URL}${path}`
+  return `${API_PUBLIC_BASE_URL}/${path}`
+}
+
+export function resolveApiHtml(html?: string | null) {
+  if (!html) return ''
+  return html.replace(/(src|href)=(['"])(\/api\/[^'"]+)\2/g, (_match, attr, quote, path) => {
+    return `${attr}=${quote}${resolveApiUrl(path)}${quote}`
+  })
+}
 
 export function configureUnauthorizedHandler(handler: (() => void) | null) {
   unauthorizedHandler = handler
